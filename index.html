@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Absensi - Multi-file Rekap Otomatis</title>
+  <style>
+    :root{--muted:#6b7280;--card:#fff}
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;margin:18px;background:#f7fafc;color:#111}
+    .wrap{max-width:1100px;margin:0 auto}
+    header{display:flex;justify-content:space-between;align-items:center}
+    h1{font-size:20px;margin:0}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+    input,select,button{padding:8px 10px;border-radius:6px;border:1px solid #d1d5db;background:#fff}
+    button{cursor:pointer}
+    .grid{display:grid;grid-template-columns:1fr 420px;gap:12px}
+    .card{background:var(--card);padding:12px;border-radius:8px;box-shadow:0 1px 3px rgba(15,23,42,0.04)}
+    table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
+    th,td{border:1px solid #e6eef6;padding:6px;text-align:left}
+    th{background:#f1f6fb}
+    #chartWrap{height:320px}
+    .progress{height:10px;background:#e6eef6;border-radius:6px;overflow:hidden}
+    .progress > div{height:100%;background:linear-gradient(90deg,#34d399,#60a5fa);width:0}
+    .muted{color:var(--muted);font-size:13px}
+    .actions{display:flex;gap:8px}
+    @media print{.no-print{display:none} .card{box-shadow:none} table{font-size:11px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Absensi — Multi-file Rekap Otomatis</h1>
+      <div class="muted">Upload banyak file Excel (.xlsx/.xls/.csv). Sistem gabungkan & rekap otomatis.</div>
+    </header>
+
+    <div class="controls no-print">
+      <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" multiple />
+      <button id="startBtn">Proses Semua File</button>
+      <label>Dari: <input id="startDate" type="date"></label>
+      <label>Sampai: <input id="endDate" type="date"></label>
+      <button id="applyFilter">Terapkan Filter</button>
+      <div style="flex:1"></div>
+      <div class="actions">
+        <button id="exportExcel">Export Excel (Detail/RekapHarian/RekapSiswa)</button>
+        <button id="printBtn">Cetak / Simpan PDF</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:10px">
+      <div style="display:flex;gap:12px;align-items:center">
+        <div style="width:200px"><strong>Progress</strong>
+          <div class="progress" style="margin-top:6px"><div id="progressBar"></div></div>
+        </div>
+        <div><span id="fileCount" class="muted">0 file dipilih</span> · <span id="rowCount" class="muted">0 baris gabungan</span></div>
+        <div style="flex:1"></div>
+        <div class="muted">Duplikat: <span id="dupCount">0</span> | Kesalahan file: <span id="errCount">0</span></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Data Detail (gabungan)</h3>
+        <div id="infoSummary" class="muted">Belum ada data. Pilih file lalu tekan "Proses Semua File".</div>
+        <div id="detailTable"></div>
+      </div>
+
+      <div>
+        <div class="card" style="margin-bottom:12px">
+          <h3>Grafik Rekap Per Tanggal</h3>
+          <div id="chartWrap"><canvas id="rekapChart" width="400" height="300"></canvas></div>
+        </div>
+
+        <div class="card">
+          <h3>Rekap Harian & Rekap Per Siswa</h3>
+          <div id="rekapSummary"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="printArea" style="display:none"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+  <script>
+  // Globals
+  let combined = []; // merged rows
+  let filtered = [];
+  let rekapPerTanggal = [];
+  let rekapPerSiswa = [];
+  let chart = null;
+
+  const fileInput = document.getElementById('fileInput');
+  const startBtn = document.getElementById('startBtn');
+  const applyFilter = document.getElementById('applyFilter');
+  const startDate = document.getElementById('startDate');
+  const endDate = document.getElementById('endDate');
+  const detailTable = document.getElementById('detailTable');
+  const rekapSummary = document.getElementById('rekapSummary');
+  const infoSummary = document.getElementById('infoSummary');
+  const progressBar = document.getElementById('progressBar');
+  const fileCount = document.getElementById('fileCount');
+  const rowCount = document.getElementById('rowCount');
+  const dupCount = document.getElementById('dupCount');
+  const errCount = document.getElementById('errCount');
+  const exportExcel = document.getElementById('exportExcel');
+  const printBtn = document.getElementById('printBtn');
+
+  // helpers
+  function normalizeDate(val){
+    if(!val && val !== 0) return '';
+    if(val instanceof Date && !isNaN(val)) return val.toISOString().slice(0,10);
+    const s = String(val).trim();
+    const isoRegex = /^\d{4}-\d{2}-\d{2}$/;
+    const dmyRegex = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/;
+    if(isoRegex.test(s)) return s;
+    const m = s.match(dmyRegex);
+    if(m){ let dd = m[1].padStart(2,'0'); let mm = m[2].padStart(2,'0'); let yy = m[3]; if(yy.length===2) yy = '20'+yy; return `${yy}-${mm}-${dd}`; }
+    const parsed = Date.parse(s);
+    if(!isNaN(parsed)) return new Date(parsed).toISOString().slice(0,10);
+    return s;
+  }
+
+  function classifyStatus(s){
+    const t = String(s||'').trim().toLowerCase();
+    if(t===''||t.includes('alfa')||t.includes('absen')||t==='a') return 'Alfa';
+    if(t.includes('hadir')||t==='h' || t==='present' ) return 'Hadir';
+    if(t.includes('sakit')) return 'Sakit';
+    if(t.includes('izin')) return 'Izin';
+    if(!isNaN(Number(t))){ return Number(t)>0 ? 'Hadir' : 'Alfa'; }
+    return 'Alfa';
+  }
+
+  function normalizeRow(row){
+    // expected columns: No, Tanggal, Nama, JK, Kelas, Status
+    const out = {};
+    // case-insensitive mapping
+    for(const k in row){
+      const lk = k.toLowerCase().trim();
+      if(lk==='tanggal' || lk==='tgl' || lk==='date') out['Tanggal'] = row[k];
+      else if(lk==='nama' || lk==='name') out['Nama'] = row[k];
+      else if(lk==='kelas' || lk==='class') out['Kelas'] = row[k];
+      else if(lk==='jk' || lk==='jenis kelamin') out['JK'] = row[k];
+      else if(lk==='status' || lk==='kehadiran') out['Status'] = row[k];
+      else if(lk==='no' || lk==='nomor') out['No'] = row[k];
+      else out[k] = row[k];
+    }
+    // try to guess missing keys
+    if(!out['Tanggal']){
+      // try first column that looks like date
+      for(const k in row){ if(/\d{4}-\d{2}-\d{2}/.test(String(row[k]))||/\d{1,2}\/\d{1,2}\/\d{2,4}/.test(String(row[k]))){ out['Tanggal']=row[k]; break; } }
+    }
+    out['Tanggal'] = normalizeDate(out['Tanggal']);
+    out['Status'] = classifyStatus(out['Status']);
+    out['Nama'] = out['Nama']||'';
+    out['Kelas'] = out['Kelas']||'';
+    out['JK'] = out['JK']||'';
+    return out;
+  }
+
+  // read multiple files and merge
+  startBtn.addEventListener('click', async ()=>{
+    const files = Array.from(fileInput.files || []);
+    if(files.length===0){ alert('Pilih minimal 1 file Excel.'); return; }
+    combined = []; progressBar.style.width='0%'; fileCount.textContent = `${files.length} file dipilih`;
+    let errors = 0; let duplicates = 0; const seen = new Set();
+    for(let i=0;i<files.length;i++){
+      const f = files[i];
+      try{
+        const arr = await f.arrayBuffer();
+        const wb = XLSX.read(arr, {type:'array'});
+        // read first sheet
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, {defval: ''});
+        for(const r of json){
+          const n = normalizeRow(r);
+          const key = (n['Nama']+'|'+n['Tanggal']).toLowerCase();
+          if(seen.has(key)) { duplicates++; continue; }
+          seen.add(key);
+          combined.push(n);
+        }
+      }catch(err){ console.error('file error',f.name,err); errors++; }
+      // update progress
+      const pct = Math.round(((i+1)/files.length)*100);
+      progressBar.style.width = pct + '%';
+      rowCount.textContent = `${combined.length} baris gabungan`;
+      dupCount.textContent = duplicates;
+      errCount.textContent = errors;
+      await new Promise(r=>setTimeout(r,50)); // small yield so UI updates
+    }
+    // sort by date then name
+    combined.sort((a,b)=>{ if(a.Tanggal===b.Tanggal) return (a.Nama||'').localeCompare(b.Nama||''); return (a.Tanggal||'').localeCompare(b.Tanggal||''); });
+    filtered = combined.slice();
+    renderAll();
+  });
+
+  applyFilter.addEventListener('click', ()=>{
+    if(combined.length===0){ alert('Belum ada data. Proses file terlebih dahulu.'); return; }
+    const s = startDate.value; const e = endDate.value;
+    filtered = combined.filter(r=>{
+      if(!r.Tanggal) return false;
+      if(s && r.Tanggal < s) return false;
+      if(e && r.Tanggal > e) return false;
+      return true;
+    });
+    renderAll();
+  });
+
+  function renderAll(){
+    renderDetailTable(filtered);
+    computeRekap(filtered);
+    renderRekap();
+    renderChart();
+    infoSummary.textContent = `Menampilkan ${filtered.length} baris (dari total ${combined.length} baris yang digabung).`;
+  }
+
+  function renderDetailTable(data){
+    if(data.length===0){ detailTable.innerHTML = '<div class="muted">Tidak ada data untuk ditampilkan.</div>'; return; }
+    const headers = ['No','Tanggal','Nama','JK','Kelas','Status'];
+    let html = '<table><thead><tr>' + headers.map(h=>`<th>${h}</th>`).join('') + '</tr></thead><tbody>';
+    data.forEach((r,i)=>{
+      html += `<tr><td>${i+1}</td><td>${r.Tanggal||''}</td><td>${r.Nama||''}</td><td>${r.JK||''}</td><td>${r.Kelas||''}</td><td>${r.Status||''}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    detailTable.innerHTML = html;
+  }
+
+  function computeRekap(data){
+    const map = {}; const siswa = {};
+    data.forEach(r=>{
+      const d = r.Tanggal||'unknown'; if(!map[d]) map[d] = {Tanggal:d,Hadir:0,Izin:0,Sakit:0,Alfa:0,Total:0};
+      const st = r.Status||'Alfa'; map[d].Total++; if(st==='Hadir') map[d].Hadir++; else if(st==='Izin') map[d].Izin++; else if(st==='Sakit') map[d].Sakit++; else map[d].Alfa++;
+      // per siswa
+      const key = (r.Nama||'').trim(); if(!siswa[key]) siswa[key] = {Nama:key,Hadir:0,Izin:0,Sakit:0,Alfa:0,Total:0}; siswa[key].Total++; if(st==='Hadir') siswa[key].Hadir++; else if(st==='Izin') siswa[key].Izin++; else if(st==='Sakit') siswa[key].Sakit++; else siswa[key].Alfa++;
+    });
+    rekapPerTanggal = Object.keys(map).sort().map(k=>map[k]);
+    rekapPerSiswa = Object.values(siswa).sort((a,b)=> b.Hadir - a.Hadir || a.Nama.localeCompare(b.Nama));
+  }
+
+  function renderRekap(){
+    // show small summary: tables for rekap harian and top students
+    let html = '<div style="margin-bottom:8px"><strong>Rekap Harian</strong></div>';
+    if(rekapPerTanggal.length===0) html += '<div class="muted">Tidak ada rekap.</div>'; else{
+      html += '<table><thead><tr><th>Tanggal</th><th>Hadir</th><th>Izin</th><th>Sakit</th><th>Alfa</th><th>Total</th></tr></thead><tbody>';
+      rekapPerTanggal.forEach(r=> html += `<tr><td>${r.Tanggal}</td><td>${r.Hadir}</td><td>${r.Izin}</td><td>${r.Sakit}</td><td>${r.Alfa}</td><td>${r.Total}</td></tr>`);
+      html += '</tbody></table>';
+    }
+    html += '<div style="margin-top:12px"><strong>Rekap Per Siswa (potongan)</strong></div>';
+    if(rekapPerSiswa.length===0) html += '<div class="muted">Tidak ada data siswa.</div>'; else{
+      html += '<table><thead><tr><th>Nama</th><th>Hadir</th><th>Izin</th><th>Sakit</th><th>Alfa</th><th>Total</th></tr></thead><tbody>';
+      rekapPerSiswa.slice(0,60).forEach(s=> html += `<tr><td>${s.Nama}</td><td>${s.Hadir}</td><td>${s.Izin}</td><td>${s.Sakit}</td><td>${s.Alfa}</td><td>${s.Total}</td></tr>`);
+      html += '</tbody></table>';
+    }
+    rekapSummary.innerHTML = html;
+  }
+
+  function renderChart(){
+    const labels = rekapPerTanggal.map(r=> r.Tanggal);
+    const hadir = rekapPerTanggal.map(r=> r.Hadir);
+    const izin = rekapPerTanggal.map(r=> r.Izin);
+    const sakit = rekapPerTanggal.map(r=> r.Sakit);
+    const alfa = rekapPerTanggal.map(r=> r.Alfa);
+    if(chart) chart.destroy();
+    const ctx = document.getElementById('rekapChart').getContext('2d');
+    chart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets: [ {label:'Hadir', data:hadir}, {label:'Izin', data:izin}, {label:'Sakit', data:sakit}, {label:'Alfa', data:alfa} ] },
+      options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom'}}, scales:{y:{beginAtZero:true}} }
+    });
+  }
+
+  // Export Excel with 3 sheets
+  exportExcel.addEventListener('click', ()=>{
+    if(filtered.length===0){ alert('Tidak ada data untuk diexport.'); return; }
+    const detailSheet = filtered.map((r,i)=> ({No:i+1, Tanggal:r.Tanggal, Nama:r.Nama, JK:r.JK, Kelas:r.Kelas, Status:r.Status}));
+    const rekapHarianSheet = rekapPerTanggal.map(r=> ({Tanggal:r.Tanggal, Hadir:r.Hadir, Izin:r.Izin, Sakit:r.Sakit, Alfa:r.Alfa, Total:r.Total}));
+    const rekapSiswaSheet = rekapPerSiswa.map(r=> ({Nama:r.Nama, Hadir:r.Hadir, Izin:r.Izin, Sakit:r.Sakit, Alfa:r.Alfa, Total:r.Total}));
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.json_to_sheet(detailSheet); XLSX.utils.book_append_sheet(wb, ws1, 'Detail');
+    const ws2 = XLSX.utils.json_to_sheet(rekapHarianSheet); XLSX.utils.book_append_sheet(wb, ws2, 'RekapHarian');
+    const ws3 = XLSX.utils.json_to_sheet(rekapSiswaSheet); XLSX.utils.book_append_sheet(wb, ws3, 'RekapSiswa');
+    const wbout = XLSX.write(wb, {bookType:'xlsx', type:'array'});
+    const blob = new Blob([wbout], {type:'application/octet-stream'});
+    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'Rekap_Absensi_Gabungan.xlsx'; a.click(); URL.revokeObjectURL(url);
+  });
+
+  // Print
+  printBtn.addEventListener('click', ()=>{
+    if(filtered.length===0){ alert('Tidak ada data untuk dicetak.'); return; }
+    const pa = document.getElementById('printArea'); pa.style.display='block'; pa.innerHTML='';
+    const h = document.createElement('div'); h.innerHTML = `<h2>Laporan Rekap Absensi (Gabungan)</h2><div>Rentang: ${startDate.value||'awal'} — ${endDate.value||'akhir'}</div>`; pa.appendChild(h);
+    const rekapDiv = document.createElement('div'); rekapDiv.innerHTML = rekapSummary.innerHTML; pa.appendChild(rekapDiv);
+    try{ const img = new Image(); img.src = chart.toBase64Image(); img.style.maxWidth='100%'; img.style.marginTop='12px'; pa.appendChild(img); }catch(e){}
+    const detDiv = document.createElement('div'); detDiv.innerHTML = detailTable.innerHTML; detDiv.style.marginTop='12px'; pa.appendChild(detDiv);
+    window.print(); setTimeout(()=>{ pa.style.display='none'; pa.innerHTML=''; },800);
+  });
+
+  </script>
+</body>
+</html>
